@@ -39,6 +39,12 @@ extern UART_HandleTypeDef husart2;
 #define DHT11_COM_Pin GPIO_PIN_4
 #define DHT11_COM_GPIO_Port GPIOA
 
+#define DHT11_BIT_DELAY_US         40
+#define DHT11_POST_INPUT_DELAY_US  10
+#define DHT11_RESPONSE_DELAY1_US   40
+#define DHT11_RESPONSE_DELAY2_US   100
+#define DHT11_RESPONSE_DELAY3_US   40   // opóźnienie końcowe po odpowiedzi (typowo 40us)
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -56,7 +62,7 @@ UART_HandleTypeDef husart2;
 
 /* USER CODE END PV */
 
-/* Private function prototypes -----------------------------------------------*/
+/* Private function prototypes ------------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
@@ -101,16 +107,38 @@ int main(void)
             Temp_byte2 = DHT11_ReadByte();
             checksum = DHT11_ReadByte();
 
-            RH = Rh_byte1;
-            TEMP = Temp_byte1;
+            // DHT22: wilgotność = ((Rh_byte1 << 8) | Rh_byte2) / 10.0
+            // DHT22: temperatura = ((Temp_byte1 & 0x7F) << 8 | Temp_byte2) / 10.0
+            // Jeśli Temp_byte1 & 0x80, to temperatura ujemna
 
-            char buf[50];
-            snprintf(buf, sizeof(buf), "Temp: %d C, RH: %d %%\r\n", TEMP, RH);
-            HAL_UART_Transmit(&husart2, (uint8_t *)buf, strlen(buf), HAL_MAX_DELAY);
+            uint16_t raw_hum = (Rh_byte1 << 8) | Rh_byte2;
+            int16_t raw_temp = (Temp_byte1 << 8) | Temp_byte2;
+            float humidity = raw_hum / 10.0f;
+            float temperature = raw_temp / 10.0f;
+
+            // Obsługa temperatury ujemnej (DHT22)
+            if (raw_temp & 0x8000)
+                temperature = -((raw_temp & 0x7FFF) / 10.0f);
+
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "R1:%d R2:%d T1:%d T2:%d C:%d\r\n", Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, checksum);
+            HAL_UART_Transmit(&husart2, (uint8_t*)dbg, strlen(dbg), HAL_MAX_DELAY);
+
+            if (((Rh_byte1 + Rh_byte2 + Temp_byte1 + Temp_byte2) & 0xFF) == checksum)
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Temp: %.1f C, RH: %.1f %%\r\n", temperature, humidity);
+                HAL_UART_Transmit(&husart2, (uint8_t *)buf, strlen(buf), HAL_MAX_DELAY);
+            }
+            else
+            {
+                char err[] = "Błąd sumy kontrolnej DHT22\r\n";
+                HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
+            }
         }
         else
         {
-            char err[] = "Brak odpowiedzi z DHT11\r\n";
+            char err[] = "Brak odpowiedzi z DHT22\r\n";
             HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
         }
         HAL_Delay(2000);
@@ -320,13 +348,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD2_Pin DHT11_COM_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin|DHT11_COM_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
@@ -346,36 +367,32 @@ void delay_us(uint16_t us)
 void DHT11_Start(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    // Ustaw pin jako wyjście
     GPIO_InitStruct.Pin = DHT11_COM_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(DHT11_COM_GPIO_Port, &GPIO_InitStruct);
 
-    // Wyślij sygnał startu
     HAL_GPIO_WritePin(DHT11_COM_GPIO_Port, DHT11_COM_Pin, GPIO_PIN_RESET);
-    HAL_Delay(18); // min. 18 ms
+    HAL_Delay(18);
     HAL_GPIO_WritePin(DHT11_COM_GPIO_Port, DHT11_COM_Pin, GPIO_PIN_SET);
     delay_us(20);
 
-    // Ustaw pin jako wejście
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(DHT11_COM_GPIO_Port, &GPIO_InitStruct);
 
-    delay_us(10); // krótka stabilizacja
+    delay_us(DHT11_POST_INPUT_DELAY_US);
 }
 
 uint8_t DHT11_CheckResponse(void)
 {
     uint8_t response = 0;
-    delay_us(40);
+    delay_us(DHT11_RESPONSE_DELAY1_US);
     if (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin))
     {
-        delay_us(80);
+        delay_us(DHT11_RESPONSE_DELAY2_US);
         if (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)) response = 1;
-        delay_us(40);
+        delay_us(DHT11_RESPONSE_DELAY3_US);
     }
     return response;
 }
@@ -385,11 +402,11 @@ uint8_t DHT11_ReadByte(void)
     uint8_t j, byte = 0;
     for (j = 0; j < 8; j++)
     {
-        while (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)); // początek bitu
-        delay_us(30); // zamiast 40
+        while (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin));
+        delay_us(DHT11_BIT_DELAY_US);
         if (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin))
             byte |= (1 << (7 - j));
-        while (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)); // koniec bitu
+        while (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin));
     }
     return byte;
 }
