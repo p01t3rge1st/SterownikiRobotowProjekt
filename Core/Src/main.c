@@ -120,10 +120,6 @@ int main(void)
             Temp_byte2 = DHT11_ReadByte();
             checksum = DHT11_ReadByte();
 
-            // DHT22: wilgotność = ((Rh_byte1 << 8) | Rh_byte2) / 10.0
-            // DHT22: temperatura = ((Temp_byte1 & 0x7F) << 8 | Temp_byte2) / 10.0
-            // Jeśli Temp_byte1 & 0x80, to temperatura ujemna
-
             uint16_t raw_hum = (Rh_byte1 << 8) | Rh_byte2;
             int16_t raw_temp = (Temp_byte1 << 8) | Temp_byte2;
             float humidity = raw_hum / 10.0f;
@@ -228,7 +224,7 @@ static void MX_TIM1_Init(void)
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 169; // <-- 1 tick = 1us przy 170MHz
+  htim1.Init.Prescaler = 170-1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -339,7 +335,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void delay_us(uint16_t us)
 {
-    __HAL_TIM_SET_COUNTER(&htim1, 0);  // licznik TIM1 (upewnij się, że jest skonfigurowany)
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
     while (__HAL_TIM_GET_COUNTER(&htim1) < us);
 }
 
@@ -390,42 +386,6 @@ uint8_t DHT11_ReadByte(void)
     return byte;
 }
 
-uint8_t sgp40_crc(uint8_t *data, uint8_t len)
-{
-    uint8_t crc = 0xFF;
-    for (uint8_t i = 0; i < len; i++)
-    {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++)
-        {
-            if (crc & 0x80)
-                crc = (crc << 1) ^ 0x31;
-            else
-                crc <<= 1;
-        }
-    }
-    return crc;
-}
-
-HAL_StatusTypeDef SGP40_MeasureRaw(uint16_t *voc_raw)
-{
-    uint8_t cmd[2] = {0x26, 0x0F}; 
-    if (HAL_I2C_Master_Transmit(&hi2c3, SGP40_I2C_ADDR, cmd, 2, HAL_MAX_DELAY) != HAL_OK)
-        return HAL_ERROR;
-
-    HAL_Delay(30); 
-
-    uint8_t rx[3];
-    if (HAL_I2C_Master_Receive(&hi2c3, SGP40_I2C_ADDR, rx, 3, HAL_MAX_DELAY) != HAL_OK)
-        return HAL_ERROR;
-
-    if (sgp40_crc(rx, 2) != rx[2])
-        return HAL_ERROR;
-
-    *voc_raw = (rx[0] << 8) | rx[1];
-    return HAL_OK;
-}
-
 HAL_StatusTypeDef SGP30_Init(void)
 {
     uint8_t cmd[2] = {0x20, 0x03};
@@ -438,7 +398,7 @@ HAL_StatusTypeDef SGP30_Read(uint16_t *co2eq, uint16_t *tvoc)
     if (HAL_I2C_Master_Transmit(&hi2c3, SGP30_I2C_ADDR, cmd, 2, HAL_MAX_DELAY) != HAL_OK)
         return HAL_ERROR;
 
-    HAL_Delay(15); // czas pomiaru
+    HAL_Delay(15); 
 
     uint8_t rx[6];
     if (HAL_I2C_Master_Receive(&hi2c3, SGP30_I2C_ADDR, rx, 6, HAL_MAX_DELAY) != HAL_OK)
