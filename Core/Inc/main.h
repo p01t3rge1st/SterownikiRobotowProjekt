@@ -36,8 +36,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-#define DHT11_DATA_Pin        GPIO_PIN_4
-#define DHT11_DATA_GPIO_Port  GPIOA
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

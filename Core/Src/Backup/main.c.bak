@@ -30,7 +30,7 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+extern UART_HandleTypeDef husart2;
 extern I2C_HandleTypeDef hi2c3;
 /* USER CODE END PTD */
 
@@ -44,10 +44,10 @@ extern I2C_HandleTypeDef hi2c3;
 #define DHT11_POST_INPUT_DELAY_US  10
 #define DHT11_RESPONSE_DELAY1_US   40
 #define DHT11_RESPONSE_DELAY2_US   100
-#define DHT11_RESPONSE_DELAY3_US   40   
+#define DHT11_RESPONSE_DELAY3_US   40   // opóźnienie końcowe po odpowiedzi (typowo 40us)
 
-#define SGP40_I2C_ADDR (0x59 << 1) 
-#define SGP30_I2C_ADDR (0x58 << 1) 
+#define SGP40_I2C_ADDR (0x59 << 1) // 7-bitowy adres przesunięty dla HAL
+#define SGP30_I2C_ADDR (0x58 << 1) // 7-bitowy adres przesunięty dla HAL
 
 /* USER CODE END PD */
 
@@ -59,7 +59,7 @@ extern I2C_HandleTypeDef hi2c3;
 /* Private variables ---------------------------------------------------------*/
 extern TIM_HandleTypeDef htim1;
 //TIM_HandleTypeDef htim1;
-
+UART_HandleTypeDef huart4;
 UART_HandleTypeDef husart2;
 //I2C_HandleTypeDef hi2c3;
 
@@ -107,7 +107,7 @@ int main(void)
     MX_I2C3_Init();
 
     SGP30_Init();
-    HAL_Delay(20);
+    HAL_Delay(20); // odczekaj po inicjalizacji
 
     while (1)
     {
@@ -129,13 +129,13 @@ int main(void)
             float humidity = raw_hum / 10.0f;
             float temperature = raw_temp / 10.0f;
 
-            
+            // Obsługa temperatury ujemnej (DHT22)
             if (raw_temp & 0x8000)
                 temperature = -((raw_temp & 0x7FFF) / 10.0f);
 
-            //char dbg[64];
-            //snprintf(dbg, sizeof(dbg), "R1:%d R2:%d T1:%d T2:%d C:%d\r\n", Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, checksum);
-            //HAL_UART_Transmit(&husart2, (uint8_t*)dbg, strlen(dbg), HAL_MAX_DELAY);
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "R1:%d R2:%d T1:%d T2:%d C:%d\r\n", Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, checksum);
+            HAL_UART_Transmit(&husart2, (uint8_t*)dbg, strlen(dbg), HAL_MAX_DELAY);
 
             if (((Rh_byte1 + Rh_byte2 + Temp_byte1 + Temp_byte2) & 0xFF) == checksum)
             {
@@ -152,6 +152,19 @@ int main(void)
         else
         {
             char err[] = "Brak odpowiedzi z DHT22\r\n";
+            HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
+        }
+        //HAL_Delay(2000);
+        uint16_t voc_raw;
+        if (SGP40_MeasureRaw(&voc_raw) == HAL_OK)
+        {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "VOC RAW: %u\r\n", voc_raw);
+            HAL_UART_Transmit(&husart2, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
+        }
+        else
+        {
+            char err[] = "SGP40 error\r\n";
             HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
         }
 
@@ -257,7 +270,54 @@ static void MX_TIM1_Init(void)
   * @param None
   * @retval None
   */
+static void MX_UART4_Init(void)
+{
 
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART2_UART_Init(void)
 {
   /* USER CODE BEGIN USART2_Init 0 */
@@ -409,11 +469,11 @@ uint8_t sgp40_crc(uint8_t *data, uint8_t len)
 
 HAL_StatusTypeDef SGP40_MeasureRaw(uint16_t *voc_raw)
 {
-    uint8_t cmd[2] = {0x26, 0x0F}; 
+    uint8_t cmd[2] = {0x26, 0x0F}; // Komenda "measure_raw"
     if (HAL_I2C_Master_Transmit(&hi2c3, SGP40_I2C_ADDR, cmd, 2, HAL_MAX_DELAY) != HAL_OK)
         return HAL_ERROR;
 
-    HAL_Delay(30); 
+    HAL_Delay(30); // Czas pomiaru wg dokumentacji
 
     uint8_t rx[3];
     if (HAL_I2C_Master_Receive(&hi2c3, SGP40_I2C_ADDR, rx, 3, HAL_MAX_DELAY) != HAL_OK)
@@ -444,6 +504,7 @@ HAL_StatusTypeDef SGP30_Read(uint16_t *co2eq, uint16_t *tvoc)
     if (HAL_I2C_Master_Receive(&hi2c3, SGP30_I2C_ADDR, rx, 6, HAL_MAX_DELAY) != HAL_OK)
         return HAL_ERROR;
 
+    // Brak sprawdzania CRC dla uproszczenia (możesz dodać wg dokumentacji)
     *co2eq = (rx[0] << 8) | rx[1];
     *tvoc  = (rx[3] << 8) | rx[4];
     return HAL_OK;

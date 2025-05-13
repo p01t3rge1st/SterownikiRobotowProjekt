@@ -30,7 +30,8 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-extern UART_HandleTypeDef husart2;
+
+extern I2C_HandleTypeDef hi2c3;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -38,6 +39,15 @@ extern UART_HandleTypeDef husart2;
 
 #define DHT11_COM_Pin GPIO_PIN_4
 #define DHT11_COM_GPIO_Port GPIOA
+
+#define DHT11_BIT_DELAY_US         40
+#define DHT11_POST_INPUT_DELAY_US  10
+#define DHT11_RESPONSE_DELAY1_US   40
+#define DHT11_RESPONSE_DELAY2_US   100
+#define DHT11_RESPONSE_DELAY3_US   40   // opóźnienie końcowe po odpowiedzi (typowo 40us)
+
+#define SGP40_I2C_ADDR (0x59 << 1) // 7-bitowy adres przesunięty dla HAL
+#define SGP30_I2C_ADDR (0x58 << 1) // 7-bitowy adres przesunięty dla HAL
 
 /* USER CODE END PD */
 
@@ -47,16 +57,17 @@ extern UART_HandleTypeDef husart2;
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim1;
+//TIM_HandleTypeDef htim1;
 
-UART_HandleTypeDef huart4;
 UART_HandleTypeDef husart2;
+//I2C_HandleTypeDef hi2c3;
 
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
 
-/* Private function prototypes -----------------------------------------------*/
+/* Private function prototypes ------------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
@@ -64,6 +75,10 @@ static void MX_USART2_UART_Init(void);
 void DHT11_Start(void);
 uint8_t DHT11_CheckResponse(void);
 uint8_t DHT11_ReadByte(void);
+uint8_t sgp40_crc(uint8_t *data, uint8_t len);
+HAL_StatusTypeDef SGP40_MeasureRaw(uint16_t *voc_raw);
+HAL_StatusTypeDef SGP30_Init(void);
+HAL_StatusTypeDef SGP30_Read(uint16_t *co2eq, uint16_t *tvoc);
 
 /* USER CODE BEGIN PFP */
 
@@ -89,6 +104,10 @@ int main(void)
     MX_USART2_UART_Init();
 
     HAL_TIM_Base_Start(&htim1);
+    MX_I2C3_Init();
+
+    SGP30_Init();
+    HAL_Delay(20); 
 
     while (1)
     {
@@ -101,19 +120,54 @@ int main(void)
             Temp_byte2 = DHT11_ReadByte();
             checksum = DHT11_ReadByte();
 
-            RH = Rh_byte1;
-            TEMP = Temp_byte1;
+            // DHT22: wilgotność = ((Rh_byte1 << 8) | Rh_byte2) / 10.0
+            // DHT22: temperatura = ((Temp_byte1 & 0x7F) << 8 | Temp_byte2) / 10.0
+            // Jeśli Temp_byte1 & 0x80, to temperatura ujemna
 
-            char buf[50];
-            snprintf(buf, sizeof(buf), "Temp: %d C, RH: %d %%\r\n", TEMP, RH);
-            HAL_UART_Transmit(&husart2, (uint8_t *)buf, strlen(buf), HAL_MAX_DELAY);
+            uint16_t raw_hum = (Rh_byte1 << 8) | Rh_byte2;
+            int16_t raw_temp = (Temp_byte1 << 8) | Temp_byte2;
+            float humidity = raw_hum / 10.0f;
+            float temperature = raw_temp / 10.0f;
+
+            // Obsługa temperatury ujemnej (DHT22)
+            if (raw_temp & 0x8000)
+                temperature = -((raw_temp & 0x7FFF) / 10.0f);
+
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "R1:%d R2:%d T1:%d T2:%d C:%d\r\n", Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, checksum);
+            HAL_UART_Transmit(&husart2, (uint8_t*)dbg, strlen(dbg), HAL_MAX_DELAY);
+
+            if (((Rh_byte1 + Rh_byte2 + Temp_byte1 + Temp_byte2) & 0xFF) == checksum)
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Temp: %.1f C, RH: %.1f %%\r\n", temperature, humidity);
+                HAL_UART_Transmit(&husart2, (uint8_t *)buf, strlen(buf), HAL_MAX_DELAY);
+            }
+            else
+            {
+                char err[] = "Błąd sumy kontrolnej DHT22\r\n";
+                HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
+            }
         }
         else
         {
-            char err[] = "Brak odpowiedzi z DHT11\r\n";
+            char err[] = "Brak odpowiedzi z DHT22\r\n";
             HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
         }
-        HAL_Delay(2000);
+
+        uint16_t co2, tvoc;
+        if (SGP30_Read(&co2, &tvoc) == HAL_OK)
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "SGP30: CO2eq: %u ppm, TVOC: %u ppb\r\n", co2, tvoc);
+            HAL_UART_Transmit(&husart2, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
+        }
+        else
+        {
+            char err[] = "SGP30 error\r\n";
+            HAL_UART_Transmit(&husart2, (uint8_t*)err, strlen(err), HAL_MAX_DELAY);
+        }
+        HAL_Delay(1000);
     }
 }
 
@@ -203,54 +257,7 @@ static void MX_TIM1_Init(void)
   * @param None
   * @retval None
   */
-static void MX_UART4_Init(void)
-{
 
-  /* USER CODE BEGIN UART4_Init 0 */
-
-  /* USER CODE END UART4_Init 0 */
-
-  /* USER CODE BEGIN UART4_Init 1 */
-
-  /* USER CODE END UART4_Init 1 */
-  huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
-  huart4.Init.WordLength = UART_WORDLENGTH_8B;
-  huart4.Init.StopBits = UART_STOPBITS_1;
-  huart4.Init.Parity = UART_PARITY_NONE;
-  huart4.Init.Mode = UART_MODE_TX_RX;
-  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN UART4_Init 2 */
-
-  /* USER CODE END UART4_Init 2 */
-
-}
-
-/**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_USART2_UART_Init(void)
 {
   /* USER CODE BEGIN USART2_Init 0 */
@@ -297,7 +304,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LD2_Pin|DHT11_COM_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LD2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -311,13 +325,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LD2_Pin DHT11_COM_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin|DHT11_COM_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
@@ -339,36 +346,32 @@ void delay_us(uint16_t us)
 void DHT11_Start(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    // Ustaw pin jako wyjście
     GPIO_InitStruct.Pin = DHT11_COM_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(DHT11_COM_GPIO_Port, &GPIO_InitStruct);
 
-    // Wyślij sygnał startu
     HAL_GPIO_WritePin(DHT11_COM_GPIO_Port, DHT11_COM_Pin, GPIO_PIN_RESET);
-    HAL_Delay(18); // min. 18 ms
+    HAL_Delay(18);
     HAL_GPIO_WritePin(DHT11_COM_GPIO_Port, DHT11_COM_Pin, GPIO_PIN_SET);
     delay_us(20);
 
-    // Ustaw pin jako wejście
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(DHT11_COM_GPIO_Port, &GPIO_InitStruct);
 
-    delay_us(10); // krótka stabilizacja
+    delay_us(DHT11_POST_INPUT_DELAY_US);
 }
 
 uint8_t DHT11_CheckResponse(void)
 {
     uint8_t response = 0;
-    delay_us(40);
+    delay_us(DHT11_RESPONSE_DELAY1_US);
     if (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin))
     {
-        delay_us(80);
+        delay_us(DHT11_RESPONSE_DELAY2_US);
         if (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)) response = 1;
-        delay_us(40);
+        delay_us(DHT11_RESPONSE_DELAY3_US);
     }
     return response;
 }
@@ -378,13 +381,73 @@ uint8_t DHT11_ReadByte(void)
     uint8_t j, byte = 0;
     for (j = 0; j < 8; j++)
     {
-        while (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)); // początek bitu
-        delay_us(40);
+        while (!HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin));
+        delay_us(DHT11_BIT_DELAY_US);
         if (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin))
             byte |= (1 << (7 - j));
-        while (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin)); // koniec bitu
+        while (HAL_GPIO_ReadPin(DHT11_COM_GPIO_Port, DHT11_COM_Pin));
     }
     return byte;
+}
+
+uint8_t sgp40_crc(uint8_t *data, uint8_t len)
+{
+    uint8_t crc = 0xFF;
+    for (uint8_t i = 0; i < len; i++)
+    {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++)
+        {
+            if (crc & 0x80)
+                crc = (crc << 1) ^ 0x31;
+            else
+                crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+HAL_StatusTypeDef SGP40_MeasureRaw(uint16_t *voc_raw)
+{
+    uint8_t cmd[2] = {0x26, 0x0F}; // Komenda "measure_raw"
+    if (HAL_I2C_Master_Transmit(&hi2c3, SGP40_I2C_ADDR, cmd, 2, HAL_MAX_DELAY) != HAL_OK)
+        return HAL_ERROR;
+
+    HAL_Delay(30); // Czas pomiaru wg dokumentacji
+
+    uint8_t rx[3];
+    if (HAL_I2C_Master_Receive(&hi2c3, SGP40_I2C_ADDR, rx, 3, HAL_MAX_DELAY) != HAL_OK)
+        return HAL_ERROR;
+
+    if (sgp40_crc(rx, 2) != rx[2])
+        return HAL_ERROR;
+
+    *voc_raw = (rx[0] << 8) | rx[1];
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef SGP30_Init(void)
+{
+    uint8_t cmd[2] = {0x20, 0x03};
+    return HAL_I2C_Master_Transmit(&hi2c3, SGP30_I2C_ADDR, cmd, 2, HAL_MAX_DELAY);
+}
+
+HAL_StatusTypeDef SGP30_Read(uint16_t *co2eq, uint16_t *tvoc)
+{
+    uint8_t cmd[2] = {0x20, 0x08};
+    if (HAL_I2C_Master_Transmit(&hi2c3, SGP30_I2C_ADDR, cmd, 2, HAL_MAX_DELAY) != HAL_OK)
+        return HAL_ERROR;
+
+    HAL_Delay(15); // czas pomiaru
+
+    uint8_t rx[6];
+    if (HAL_I2C_Master_Receive(&hi2c3, SGP30_I2C_ADDR, rx, 6, HAL_MAX_DELAY) != HAL_OK)
+        return HAL_ERROR;
+
+    // Brak sprawdzania CRC dla uproszczenia (możesz dodać wg dokumentacji)
+    *co2eq = (rx[0] << 8) | rx[1];
+    *tvoc  = (rx[3] << 8) | rx[4];
+    return HAL_OK;
 }
 
 /* USER CODE END 4 */
